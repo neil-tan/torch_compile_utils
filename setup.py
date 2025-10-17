@@ -6,6 +6,9 @@ A high-level compilation orchestration framework for PyTorch 2.0+.
 
 from setuptools import setup, find_packages
 
+
+
+
 # Read README for long description
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -18,9 +21,7 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/neil-tan/torch_compile_utils",
-    py_modules=[
-        "torch_compile_utils",
-    ],
+    packages=find_packages(),
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
