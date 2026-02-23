@@ -270,56 +270,65 @@ def profile_guided(warmup_steps: int = 100, verbose: bool = False):
     return decorator
 
 
-def shape_specialized(*arg_indices: int):
+def shape_specialized(
+    *arg_indices: int,
+    mode: str = "reduce-overhead",
+    fullgraph: bool = False,
+    max_specializations: int = 8,
+):
     """
     Create specialized compilations for different tensor shapes.
 
+    Each unique shape combination gets its own compiled version, so CUDA
+    graphs work even when the same method is called with different shapes
+    (e.g. training vs validation). This avoids recompilation limits while
+    still enabling CUDA graphs for each individual shape.
+
     Args:
-        arg_indices: Indices of arguments to specialize on
+        arg_indices: Indices of positional arguments to specialize on.
+        mode: torch.compile mode for each specialization.
+        fullgraph: If True, require single-graph capture (may fail on
+            conditionals or data-dependent control flow).
+        max_specializations: Maximum number of cached compilations.
+            Beyond this limit, new shapes fall back to eager execution
+            to avoid unbounded memory growth.
 
     Example:
-        @shape_specialized(0, 1)  # Specialize on first two arguments
-        def matmul(self, a, b):
-            return torch.matmul(a, b)
+        @shape_specialized(0, 1, mode="reduce-overhead")
+        def forward(self, z_sequence, conditioning=None):
+            ...
     """
     def decorator(func):
-        # Cache for different shape specializations
         specialization_cache = {}
 
         @wraps(func)
         def wrapper(self, *args, **kwargs):
-            # Create shape signature
-            shape_key = []
-            for idx in arg_indices:
-                if idx < len(args) and torch.is_tensor(args[idx]):
-                    shape_key.append(args[idx].shape)
-                else:
-                    shape_key.append(None)
-            shape_key = tuple(shape_key)
+            # Build shape key from specified argument indices
+            shape_key = tuple(
+                args[idx].shape if idx < len(args) and torch.is_tensor(args[idx]) else None
+                for idx in arg_indices
+            )
 
-            # Get or create specialized compilation
             if shape_key not in specialization_cache:
-                # Determine if all shapes are static
-                all_static = all(s is not None for s in shape_key)
+                if len(specialization_cache) >= max_specializations:
+                    # Safety limit: fall back to eager to avoid unbounded cache
+                    warnings.warn(
+                        f"shape_specialized: hit max_specializations={max_specializations} "
+                        f"for {func.__name__}, falling back to eager for shape {shape_key}"
+                    )
+                    return func(self, *args, **kwargs)
 
-                if all_static:
-                    # Static shapes - aggressive optimization
-                    compile_kwargs = {
-                        "mode": "max-autotune",
-                        "fullgraph": True,
-                        "options": {"triton.cudagraphs": True}
-                    }
-                else:
-                    # Dynamic or mixed shapes
-                    compile_kwargs = {"mode": "default", "dynamic": True}
-
+                compile_kwargs = {"mode": mode, "fullgraph": fullgraph}
                 try:
                     specialization_cache[shape_key] = torch.compile(func, **compile_kwargs)
-                except:
+                except Exception as e:
+                    warnings.warn(
+                        f"shape_specialized: compilation failed for {func.__name__} "
+                        f"with shape {shape_key}: {e}. Falling back to eager."
+                    )
                     specialization_cache[shape_key] = func
 
-            specialized_func = specialization_cache[shape_key]
-            return specialized_func(self, *args, **kwargs)
+            return specialization_cache[shape_key](self, *args, **kwargs)
 
         wrapper._is_shape_specialized = True
         wrapper._specialization_cache = specialization_cache
