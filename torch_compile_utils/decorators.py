@@ -306,6 +306,14 @@ def shape_specialized(
     def decorator(func):
         specialization_cache = {}
 
+        # All specializations compile the same function, sharing dynamo's
+        # per-code-object recompile counter. Raise the limit so all shape ×
+        # context combinations fit without hitting recompile_limit(8).
+        import torch._dynamo.config
+        needed = max_specializations * 3  # headroom for context variants
+        if torch._dynamo.config.cache_size_limit < needed:
+            torch._dynamo.config.cache_size_limit = needed
+
         @wraps(func)
         def wrapper(self, *args, **kwargs):
             # Build shape key from positional arg indices + named kwargs
@@ -317,7 +325,11 @@ def shape_specialized(
                 kwargs[name].shape if name in kwargs and torch.is_tensor(kwargs[name]) else None
                 for name in kwarg_names
             )
-            shape_key = pos_shapes + kw_shapes
+            # Include execution context in key — reduce-overhead (CUDA graphs)
+            # creates strict dynamo guards on these, so mixing contexts in one
+            # compiled fn causes recompilations until the limit is hit.
+            ctx = (self.training, torch.is_grad_enabled(), torch.is_inference_mode_enabled())
+            shape_key = pos_shapes + kw_shapes + (ctx,)
 
             if shape_key not in specialization_cache:
                 if len(specialization_cache) >= max_specializations:
