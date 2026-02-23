@@ -272,6 +272,7 @@ def profile_guided(warmup_steps: int = 100, verbose: bool = False):
 
 def shape_specialized(
     *arg_indices: int,
+    kwarg_names: tuple[str, ...] = (),
     mode: str = "reduce-overhead",
     fullgraph: bool = False,
     max_specializations: int = 8,
@@ -285,7 +286,11 @@ def shape_specialized(
     still enabling CUDA graphs for each individual shape.
 
     Args:
-        arg_indices: Indices of positional arguments to specialize on.
+        arg_indices: Indices of positional arguments to specialize on
+            (0-based, excluding ``self``).
+        kwarg_names: Names of keyword arguments to include in the shape
+            key. Useful when arguments like ``conditioning`` are passed
+            by name and may be ``None`` or a tensor.
         mode: torch.compile mode for each specialization.
         fullgraph: If True, require single-graph capture (may fail on
             conditionals or data-dependent control flow).
@@ -294,7 +299,7 @@ def shape_specialized(
             to avoid unbounded memory growth.
 
     Example:
-        @shape_specialized(0, 1, mode="reduce-overhead")
+        @shape_specialized(0, kwarg_names=("conditioning",), mode="reduce-overhead")
         def forward(self, z_sequence, conditioning=None):
             ...
     """
@@ -303,11 +308,16 @@ def shape_specialized(
 
         @wraps(func)
         def wrapper(self, *args, **kwargs):
-            # Build shape key from specified argument indices
-            shape_key = tuple(
+            # Build shape key from positional arg indices + named kwargs
+            pos_shapes = tuple(
                 args[idx].shape if idx < len(args) and torch.is_tensor(args[idx]) else None
                 for idx in arg_indices
             )
+            kw_shapes = tuple(
+                kwargs[name].shape if name in kwargs and torch.is_tensor(kwargs[name]) else None
+                for name in kwarg_names
+            )
+            shape_key = pos_shapes + kw_shapes
 
             if shape_key not in specialization_cache:
                 if len(specialization_cache) >= max_specializations:
